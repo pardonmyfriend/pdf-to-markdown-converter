@@ -29,28 +29,51 @@ def map_font_sizes_to_headings(sizes: list[float]) -> tuple[dict[float, str], fl
     smallest_size = sizes[-1]
     return size_to_heading, smallest_size
 
-def extract_text_with_style(pdf_path: str, line_gap_threshold: float = 5.0) -> list[str]:
+def table_to_markdown(table: list[list[str]]) -> str:
+    def clean(cell):
+        return (cell or "").replace('\n', ' ').replace('\r', ' ').strip()
+
+    if not table or not table[0]:
+        return ""
+
+    header = "| " + " | ".join(clean(cell) for cell in table[0]) + " |"
+    separator = "| " + " | ".join("---" for _ in table[0]) + " |"
+    rows = [
+        "| " + " | ".join(clean(cell) for cell in row) + " |"
+        for row in table[1:]
+    ]
+    return "\n".join([header, separator] + rows)
+
+
+def extract_content_preserving_order(pdf_path: str, line_gap_threshold=5.0) -> list[str]:
     font_sizes = detect_font_sizes(pdf_path)
     size_to_heading, smallest_size = map_font_sizes_to_headings(font_sizes)
 
-    paragraphs = []
+    all_elements = []
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
+            tables = page.find_tables()
+            table_bboxes = [t.bbox for t in tables]
+
             words = page.extract_words(
                 use_text_flow=True,
                 keep_blank_chars=True,
                 extra_attrs=["top", "bottom", "fontname", "size"]
             )
 
-            words.sort(key=lambda x: (x["top"], x["x0"]))
+            words.sort(key=lambda w: (w["top"], w["x0"]))
 
+            lines = []
             paragraph = ""
             prev_bottom = None
             current_line_top = None
             current_line_size = None
 
             for word in words:
+                if any(bbox[0] <= word["x0"] <= bbox[2] and bbox[1] <= word["top"] <= bbox[3] for bbox in table_bboxes):
+                    continue
+
                 text = word["text"].strip()
                 if not text:
                     continue
@@ -68,28 +91,34 @@ def extract_text_with_style(pdf_path: str, line_gap_threshold: float = 5.0) -> l
                     gap = top - prev_bottom
                     if gap > line_gap_threshold:
                         if paragraph:
-                            if current_line_size in size_to_heading:
-                                heading_md = size_to_heading[current_line_size]
-                                paragraphs.append(f"{heading_md} {paragraph.strip()}")
-                            else:
-                                paragraphs.append(paragraph.strip())
+                            content = f"{size_to_heading[current_line_size]} {paragraph.strip()}" if current_line_size in size_to_heading else paragraph.strip()
+                            lines.append((current_line_top, content))
                             paragraph = ""
 
                 if current_line_top is None or abs(top - current_line_top) > 0.1:
                     current_line_top = top
                     current_line_size = size
-                            
+
                 paragraph += " " + styled_text
-                prev_bottom = word["bottom"]
+                prev_bottom = bottom
 
             if paragraph:
-                if current_line_size in size_to_heading:
-                    heading_md = size_to_heading[current_line_size]
-                    paragraphs.append(f"{heading_md} {paragraph.strip()}")
-                else:
-                    paragraphs.append(paragraph.strip())
+                content = f"{size_to_heading[current_line_size]} {paragraph.strip()}" if current_line_size in size_to_heading else paragraph.strip()
+                lines.append((current_line_top, content))
 
-    return paragraphs
+            all_elements.extend([("text", top, content) for (top, content) in lines])
+
+            for table in tables:
+                top = table.bbox[1]
+                table_data = table.extract()
+                if table_data:
+                    md_table = table_to_markdown(table_data)
+                    all_elements.append(("table", top, md_table))
+
+    all_elements.sort(key=lambda e: e[1])
+
+    return [content for (_, _, content) in all_elements]
+
 
 def convert_to_markdown(paragraphs: list[str]) -> str:
     return "\n\n".join(paragraphs)
@@ -102,7 +131,7 @@ if __name__ == "__main__":
     input_pdf = "input.pdf"
     output_md = "output.md"
 
-    paragraphs = extract_text_with_style(input_pdf, line_gap_threshold=7.0)
-    markdown = convert_to_markdown(paragraphs)
+    content_blocks = extract_content_preserving_order(input_pdf, line_gap_threshold=7.0)
+    markdown = convert_to_markdown(content_blocks)
     save_markdown(markdown, output_md)
-    print(f"Zapisano {len(paragraphs)} paragrafów do pliku: {output_md}")
+    print(f"Zapisano {len(content_blocks)} bloków (tekstu i tabel) do pliku: {output_md}")
