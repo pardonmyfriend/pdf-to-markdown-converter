@@ -15,23 +15,40 @@ def wrap_markdown(text: str, bold: bool, italic: bool) -> str:
         return f"*{text}*"
     else:
         return text
+    
+def detect_font_sizes(pdf_path: str) -> list[float]:
+    sizes = set()
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            for word in page.extract_words(extra_attrs=["size"]):
+                sizes.add(round(word["size"], 1))
+    return sorted(sizes, reverse=True)
 
-def extract_paragraphs_from_pdf(pdf_path: str, line_gap_threshold: float = 5.0) -> list[str]:
+def map_font_sizes_to_headings(sizes: list[float]) -> tuple[dict[float, str], float]:
+    size_to_heading = {size: f'{"#" * (i + 1)}' for i, size in enumerate(sizes[:-1])}
+    smallest_size = sizes[-1]
+    return size_to_heading, smallest_size
+
+def extract_text_with_style(pdf_path: str, line_gap_threshold: float = 5.0) -> list[str]:
+    font_sizes = detect_font_sizes(pdf_path)
+    size_to_heading, smallest_size = map_font_sizes_to_headings(font_sizes)
+
     paragraphs = []
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            words = []
-            for block in page.extract_words(
-                use_text_flow=True, 
-                keep_blank_chars=True, 
-                extra_attrs=["top", "bottom", "fontname", "size"]):
-                words.append(block)
+            words = page.extract_words(
+                use_text_flow=True,
+                keep_blank_chars=True,
+                extra_attrs=["top", "bottom", "fontname", "size"]
+            )
 
             words.sort(key=lambda x: (x["top"], x["x0"]))
 
             paragraph = ""
             prev_bottom = None
+            current_line_top = None
+            current_line_size = None
 
             for word in words:
                 text = word["text"].strip()
@@ -39,7 +56,10 @@ def extract_paragraphs_from_pdf(pdf_path: str, line_gap_threshold: float = 5.0) 
                     continue
 
                 top = word["top"]
+                bottom = word["bottom"]
                 font = word.get("fontname", "")
+                size = round(word.get("size", smallest_size), 1)
+
                 bold = is_bold(font)
                 italic = is_italic(font)
                 styled_text = wrap_markdown(text, bold, italic)
@@ -48,14 +68,26 @@ def extract_paragraphs_from_pdf(pdf_path: str, line_gap_threshold: float = 5.0) 
                     gap = top - prev_bottom
                     if gap > line_gap_threshold:
                         if paragraph:
-                            paragraphs.append(paragraph.strip())
+                            if current_line_size in size_to_heading:
+                                heading_md = size_to_heading[current_line_size]
+                                paragraphs.append(f"{heading_md} {paragraph.strip()}")
+                            else:
+                                paragraphs.append(paragraph.strip())
                             paragraph = ""
 
+                if current_line_top is None or abs(top - current_line_top) > 0.1:
+                    current_line_top = top
+                    current_line_size = size
+                            
                 paragraph += " " + styled_text
                 prev_bottom = word["bottom"]
 
             if paragraph:
-                paragraphs.append(paragraph.strip())
+                if current_line_size in size_to_heading:
+                    heading_md = size_to_heading[current_line_size]
+                    paragraphs.append(f"{heading_md} {paragraph.strip()}")
+                else:
+                    paragraphs.append(paragraph.strip())
 
     return paragraphs
 
@@ -70,7 +102,7 @@ if __name__ == "__main__":
     input_pdf = "input.pdf"
     output_md = "output.md"
 
-    paragraphs = extract_paragraphs_from_pdf(input_pdf, line_gap_threshold=7.0)
+    paragraphs = extract_text_with_style(input_pdf, line_gap_threshold=7.0)
     markdown = convert_to_markdown(paragraphs)
     save_markdown(markdown, output_md)
     print(f"Zapisano {len(paragraphs)} paragrafów do pliku: {output_md}")
